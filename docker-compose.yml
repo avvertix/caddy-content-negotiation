@@ -1,0 +1,25 @@
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+      - "8443:443"
+      - "2019:2019"   # Caddy admin API
+    volumes:
+      # Override the Caddyfile without rebuilding the image
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Serve your own content directory
+      - ./docker/content:/srv:ro
+      # Persist TLS certificates across restarts
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      # Set to your domain when running in production
+      DOMAIN: localhost
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

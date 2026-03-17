@@ -1,0 +1,15 @@
+# Built Caddy binary (produced by xcaddy)
+caddy
+caddy.exe
+
+# Go build artifacts
+*.test
+coverage.out
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

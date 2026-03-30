@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/caddyserver/caddy/v2"
-	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
 // mockReplacer implements just enough of the Caddy replacer for tests.
@@ -192,21 +190,10 @@ func TestFileExists(t *testing.T) {
 // more thoroughly and the handler in a simplified way.
 func TestServeHTTPNoAcceptHeader(t *testing.T) {
 	dir := setupTestDir(t)
-	m := &MarkdownIntercept{
-		Root:       dir,
-		IndexNames: []string{"index.html"},
-		Extensions: []string{".html"},
-	}
 
 	r := httptest.NewRequest("GET", "/docs/page.html", nil)
 	// No Accept: text/markdown header
-
-	// Add a mock replacer to context
-	repl := caddy.NewReplacer()
-	ctx := r.Context()
-	ctx = caddyhttp.WithVarsCtx(ctx, map[string]any{})
-	r = r.WithContext(ctx)
-	_ = repl // replacer not needed since we skip markdown check
+	_ = dir
 
 	w := httptest.NewRecorder()
 	next := &mockHandler{}

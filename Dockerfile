@@ -15,12 +15,15 @@ FROM caddy:2.11.2
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
 # Copy sample Caddyfile
-COPY docker/Caddyfile /etc/caddy/Caddyfile
+COPY example/Caddyfile /etc/caddy/Caddyfile
 
 # Copy sample web content (markdown + HTML files)
-COPY docker/content /srv
+COPY example/content /srv
+
+WORKDIR /srv
 
 EXPOSE 80 443 2019
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
-  CMD caddy validate --config /etc/caddy/Caddyfile || exit 1
+CMD ["run", "--config", "/etc/caddy/Caddyfile"]
+
+ENTRYPOINT ["caddy"]

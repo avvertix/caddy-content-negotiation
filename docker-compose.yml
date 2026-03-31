@@ -9,9 +9,9 @@ services:
       - "2019:2019"   # Caddy admin API
     volumes:
       # Override the Caddyfile without rebuilding the image
-      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./example/Caddyfile:/etc/caddy/Caddyfile:ro
       # Serve your own content directory
-      - ./docker/content:/srv:ro
+      - ./example/content:/srv:ro
       # Persist TLS certificates across restarts
       - caddy_data:/data
       - caddy_config:/config

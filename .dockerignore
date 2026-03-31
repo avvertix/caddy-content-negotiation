@@ -1,0 +1,5 @@
+caddy
+caddy.exe
+docker/
+.github/
+docker-compose.yml

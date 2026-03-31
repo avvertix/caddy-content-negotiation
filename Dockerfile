@@ -1,5 +1,5 @@
 # Stage 1: Build Caddy with the markdown-intercept module
-FROM caddy:2.11-builder AS builder
+FROM caddy:2.11.2-builder AS builder
 
 # Copy module source
 COPY . /caddy-markdown-intercept
@@ -9,7 +9,7 @@ RUN xcaddy build \
     --with github.com/avvertix/caddy-content-negotiation=/caddy-markdown-intercept
 
 # Stage 2: Runtime image
-FROM caddy:2.11
+FROM caddy:2.11.2
 
 # Replace the stock caddy binary with our custom build
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

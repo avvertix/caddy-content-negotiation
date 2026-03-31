@@ -1,4 +1,4 @@
-# caddy-markdown-intercept
+# Content Negotiation module for Caddy
 
 A Caddy middleware module that intercepts HTTP requests containing `Accept: text/markdown` and serves precomputed `.md` files located alongside the originally requested resources.
 
@@ -120,7 +120,6 @@ curl https://example.com/docs/page.html
 When a markdown file is served, the response includes:
 
 - `Content-Type: text/markdown; charset=utf-8`
-- `X-Markdown-Source: <filename>` — the basename of the served `.md` file
 
 ## Development
 

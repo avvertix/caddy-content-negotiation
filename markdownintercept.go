@@ -100,10 +100,12 @@ func (m MarkdownIntercept) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 	// Determine the markdown file path to look for
 	mdPath := m.resolveMarkdownPath(root, reqPath)
 	if mdPath == "" {
-		// No markdown file found; pass to next handler
+		// No markdown file found; signal to downstream handlers that the client
+		// requested markdown, then pass through.
 		m.logger.Debug("no markdown file found",
 			zap.String("request_path", r.URL.Path),
 		)
+		r.Header.Set("X-Content-Md", "requested")
 		return next.ServeHTTP(w, r)
 	}
 

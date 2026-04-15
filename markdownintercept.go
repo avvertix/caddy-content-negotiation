@@ -136,12 +136,19 @@ func (m MarkdownIntercept) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 // requested path. It returns the absolute filesystem path to the .md file,
 // or an empty string if none is found.
 func (m *MarkdownIntercept) resolveMarkdownPath(root, reqPath string) string {
+	// Resolve root to an absolute, clean path once so that the jail check in
+	// safeJoin works correctly even when root is "." or another relative path.
+	absRoot, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return ""
+	}
+
 	// Case 1: Path ends with "/" — try index files
 	if strings.HasSuffix(reqPath, "/") {
 		for _, idx := range m.IndexNames {
 			mdName := replaceExtWithMd(idx)
-			candidate := filepath.Join(root, filepath.FromSlash(reqPath), mdName)
-			if fileExists(candidate) {
+			candidate := safeJoin(absRoot, filepath.Join(filepath.FromSlash(reqPath), mdName))
+			if candidate != "" && fileExists(candidate) {
 				return candidate
 			}
 		}
@@ -152,8 +159,8 @@ func (m *MarkdownIntercept) resolveMarkdownPath(root, reqPath string) string {
 	ext := path.Ext(reqPath)
 	if ext != "" && m.isKnownExtension(ext) {
 		mdName := replaceExtWithMd(filepath.Base(reqPath))
-		candidate := filepath.Join(root, filepath.FromSlash(path.Dir(reqPath)), mdName)
-		if fileExists(candidate) {
+		candidate := safeJoin(absRoot, filepath.Join(filepath.FromSlash(path.Dir(reqPath)), mdName))
+		if candidate != "" && fileExists(candidate) {
 			return candidate
 		}
 		return ""
@@ -161,29 +168,35 @@ func (m *MarkdownIntercept) resolveMarkdownPath(root, reqPath string) string {
 
 	// Case 3: No extension (e.g., /about) — try appending .md directly
 	if ext == "" {
-		candidate := filepath.Join(root, filepath.FromSlash(reqPath+".md"))
-		if fileExists(candidate) {
+		candidate := safeJoin(absRoot, filepath.FromSlash(reqPath+".md"))
+		if candidate != "" && fileExists(candidate) {
 			return candidate
 		}
 		// Also try as a directory with index
 		for _, idx := range m.IndexNames {
 			mdName := replaceExtWithMd(idx)
-			candidate := filepath.Join(root, filepath.FromSlash(reqPath), mdName)
-			if fileExists(candidate) {
+			candidate = safeJoin(absRoot, filepath.Join(filepath.FromSlash(reqPath), mdName))
+			if candidate != "" && fileExists(candidate) {
 				return candidate
 			}
 		}
 		return ""
 	}
 
-	// Case 4: Unknown extension — try replacing with .md anyway
-	mdName := replaceExtWithMd(filepath.Base(reqPath))
-	candidate := filepath.Join(root, filepath.FromSlash(path.Dir(reqPath)), mdName)
-	if fileExists(candidate) {
-		return candidate
-	}
-
 	return ""
+}
+
+// safeJoin joins absRoot and elem, returning the resulting absolute path only
+// if it remains within absRoot. Returns an empty string if the join would
+// escape absRoot (path traversal protection).
+//
+// absRoot must already be an absolute, cleaned path (use filepath.Abs first).
+func safeJoin(absRoot, elem string) string {
+	joined := filepath.Clean(filepath.Join(absRoot, elem))
+	if joined != absRoot && !strings.HasPrefix(joined, absRoot+string(filepath.Separator)) {
+		return ""
+	}
+	return joined
 }
 
 // isKnownExtension checks if ext is in the configured Extensions list.

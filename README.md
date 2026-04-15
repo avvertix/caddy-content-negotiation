@@ -79,6 +79,7 @@ example.com {
         root /var/www/html
         index_names index.html index.htm index.php
         extensions .html .htm .php .txt
+        experimental_range_requests
     }
     file_server
 }
@@ -91,6 +92,7 @@ example.com {
 | `root` | Site root (`{http.vars.root}`) | Filesystem path to look for `.md` files |
 | `index_names` | `index.html index.htm index.php` | Index filenames to try for directory requests |
 | `extensions` | `.html .htm .php .txt` | File extensions eligible for `.md` substitution |
+| `experimental_range_requests` | disabled | Enable the `x-frontmatter` range unit (see below) |
 
 ## JSON Configuration
 
@@ -99,7 +101,8 @@ example.com {
   "handler": "markdown_intercept",
   "root": "/var/www/html",
   "index_names": ["index.html", "index.htm"],
-  "extensions": [".html", ".htm", ".php"]
+  "extensions": [".html", ".htm", ".php"],
+  "experimental_range_requests": true
 }
 ```
 
@@ -115,11 +118,36 @@ curl -H "Accept: text/markdown" https://example.com/docs/page.html
 curl https://example.com/docs/page.html
 ```
 
+### Frontmatter range requests (experimental)
+
+When `experimental_range_requests` is enabled, clients can request only the
+frontmatter block of a markdown file using the non-standard `x-frontmatter`
+[range](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Range_requests) unit:
+
+```bash
+curl -H "Accept: text/markdown" \
+     -H "Range: x-frontmatter" \
+     https://example.com/docs/page.html
+```
+
+The server responds with `206 Partial Content` and only the frontmatter section
+(the content between the opening and closing `---` delimiters). If the file has
+no frontmatter block, the server returns `416 Range Not Satisfiable`.
+
+When the feature is enabled, every markdown response includes
+`Accept-Ranges: x-frontmatter` so clients can discover support before issuing a
+range request.
+
 ## Response Headers
 
 When a markdown file is served, the response includes:
 
 - `Content-Type: text/markdown; charset=utf-8`
+- `Accept-Ranges: x-frontmatter` (only when `experimental_range_requests` is enabled)
+
+A `206 Partial Content` frontmatter response additionally includes:
+
+- `Content-Range: x-frontmatter 0-<end>/<total>` — byte offsets of the frontmatter block within the full file
 
 ## Development
 

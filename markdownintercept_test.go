@@ -43,6 +43,7 @@ func setupTestDir(t *testing.T) string {
 	os.WriteFile(filepath.Join(dir, "docs", "index.md"), []byte("# Docs Index\n\nWelcome"), 0o644)
 	os.WriteFile(filepath.Join(dir, "about.md"), []byte("# About\n\nAbout page"), 0o644)
 	os.WriteFile(filepath.Join(dir, "readme.md"), []byte("# Readme\n\nReadme content"), 0o644)
+	os.WriteFile(filepath.Join(dir, "docs", "post.md"), []byte("---\ntitle: Post\ndate: 2024-01-01\n---\n\n# Post\n\nBody text."), 0o644)
 
 	return dir
 }
@@ -428,4 +429,175 @@ func TestServeHTTP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractFrontmatter(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantFound bool
+		wantOut   string // expected content of the returned slice
+	}{
+		{
+			name:      "valid frontmatter LF",
+			input:     "---\ntitle: Hello\n---\n\n# Body",
+			wantFound: true,
+			wantOut:   "---\ntitle: Hello\n---\n",
+		},
+		{
+			name:      "valid frontmatter CRLF",
+			input:     "---\r\ntitle: Hello\r\n---\r\n\r\n# Body",
+			wantFound: true,
+			wantOut:   "---\r\ntitle: Hello\r\n---\r\n",
+		},
+		{
+			name:      "frontmatter only — closing delimiter at EOF without trailing newline",
+			input:     "---\ntitle: Hello\n---",
+			wantFound: true,
+			wantOut:   "---\ntitle: Hello\n---",
+		},
+		{
+			name:      "no frontmatter — plain markdown",
+			input:     "# Heading\n\nBody text.",
+			wantFound: false,
+		},
+		{
+			name:      "dashes not on first line",
+			input:     "\n---\ntitle: Hello\n---\n",
+			wantFound: false,
+		},
+		{
+			name:      "empty frontmatter body — opening immediately followed by closing LF",
+			input:     "---\n---\n\n# Body",
+			wantFound: true,
+			wantOut:   "---\n---\n",
+		},
+		{
+			name:      "empty frontmatter body — opening immediately followed by closing CRLF",
+			input:     "---\r\n---\r\n\r\n# Body",
+			wantFound: true,
+			wantOut:   "---\r\n---\r\n",
+		},
+		{
+			name:      "opening delimiter only — no closing",
+			input:     "---\ntitle: Hello\n",
+			wantFound: false,
+		},
+		{
+			name:      "dashes inside body not treated as closing delimiter",
+			input:     "---\ntitle: Hello\n---more\n---\n\n# Body",
+			wantFound: true,
+			wantOut:   "---\ntitle: Hello\n---more\n---\n",
+		},
+		{
+			name:      "empty content",
+			input:     "",
+			wantFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := extractFrontmatter([]byte(tt.input))
+			if ok != tt.wantFound {
+				t.Fatalf("extractFrontmatter() found = %v, want %v", ok, tt.wantFound)
+			}
+			if ok {
+				if string(got) != tt.wantOut {
+					t.Errorf("extractFrontmatter() = %q, want %q", string(got), tt.wantOut)
+				}
+				if len(got) < 3 || string(got[:3]) != "---" {
+					t.Errorf("extractFrontmatter() result must start with \"---\", got %q", string(got))
+				}
+			}
+		})
+	}
+}
+
+func TestServeHTTPRangeRequest(t *testing.T) {
+	dir := setupTestDir(t)
+
+	m := MarkdownIntercept{
+		Root:                      dir,
+		IndexNames:                []string{"index.html"},
+		Extensions:                []string{".html"},
+		ExperimentalRangeRequests: true,
+		logger:                    zap.NewNop(),
+	}
+
+	t.Run("range feature disabled — no Accept-Ranges and Range header ignored", func(t *testing.T) {
+		disabled := MarkdownIntercept{
+			Root:       dir,
+			IndexNames: []string{"index.html"},
+			Extensions: []string{".html"},
+			logger:     zap.NewNop(),
+			// ExperimentalRangeRequests deliberately left false
+		}
+		r := newRequestWithCaddyContext("GET", "/docs/post.html")
+		r.Header.Set("Accept", "text/markdown")
+		r.Header.Set("Range", "x-frontmatter")
+		w := httptest.NewRecorder()
+		if err := disabled.ServeHTTP(w, r, &mockHandler{}); err != nil {
+			t.Fatalf("ServeHTTP error: %v", err)
+		}
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200 (range ignored when feature disabled)", w.Code)
+		}
+		if got := w.Header().Get("Accept-Ranges"); got != "" {
+			t.Errorf("Accept-Ranges = %q, want empty when feature disabled", got)
+		}
+	})
+
+	t.Run("Accept-Ranges advertised on full response", func(t *testing.T) {
+		r := newRequestWithCaddyContext("GET", "/docs/post.html")
+		r.Header.Set("Accept", "text/markdown")
+		w := httptest.NewRecorder()
+		if err := m.ServeHTTP(w, r, &mockHandler{}); err != nil {
+			t.Fatalf("ServeHTTP error: %v", err)
+		}
+		if got := w.Header().Get("Accept-Ranges"); got != "x-frontmatter" {
+			t.Errorf("Accept-Ranges = %q, want %q", got, "x-frontmatter")
+		}
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", w.Code)
+		}
+	})
+
+	t.Run("x-frontmatter range returns 206 with frontmatter only", func(t *testing.T) {
+		r := newRequestWithCaddyContext("GET", "/docs/post.html")
+		r.Header.Set("Accept", "text/markdown")
+		r.Header.Set("Range", "x-frontmatter")
+		w := httptest.NewRecorder()
+		if err := m.ServeHTTP(w, r, &mockHandler{}); err != nil {
+			t.Fatalf("ServeHTTP error: %v", err)
+		}
+		if w.Code != http.StatusPartialContent {
+			t.Errorf("status = %d, want 206", w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "text/markdown; charset=utf-8" {
+			t.Errorf("Content-Type = %q, want text/markdown; charset=utf-8", ct)
+		}
+		wantBody := "---\ntitle: Post\ndate: 2024-01-01\n---\n"
+		if got := w.Body.String(); got != wantBody {
+			t.Errorf("body = %q, want %q", got, wantBody)
+		}
+		// Content-Range must be present and reference x-frontmatter unit.
+		cr := w.Header().Get("Content-Range")
+		if !strings.HasPrefix(cr, "x-frontmatter ") {
+			t.Errorf("Content-Range = %q, want x-frontmatter prefix", cr)
+		}
+	})
+
+	t.Run("x-frontmatter range on file without frontmatter returns 416", func(t *testing.T) {
+		r := newRequestWithCaddyContext("GET", "/docs/page.html")
+		r.Header.Set("Accept", "text/markdown")
+		r.Header.Set("Range", "x-frontmatter")
+		w := httptest.NewRecorder()
+		if err := m.ServeHTTP(w, r, &mockHandler{}); err != nil {
+			t.Fatalf("ServeHTTP error: %v", err)
+		}
+		if w.Code != http.StatusRequestedRangeNotSatisfiable {
+			t.Errorf("status = %d, want 416", w.Code)
+		}
+	})
 }

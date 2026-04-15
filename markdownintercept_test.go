@@ -1,12 +1,16 @@
 package markdownintercept
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/caddyserver/caddy/v2"
+	"go.uber.org/zap"
 )
 
 // mockReplacer implements just enough of the Caddy replacer for tests.
@@ -215,9 +219,213 @@ func TestDirectoryTraversal(t *testing.T) {
 		Extensions: []string{".html"},
 	}
 
-	// Attempt directory traversal
-	result := m.resolveMarkdownPath(dir, "/../../../etc/passwd")
-	if result != "" {
-		t.Errorf("directory traversal should not resolve, got %q", result)
+	traversalPaths := []string{
+		"/../../../etc/passwd",
+		"/docs/../../etc/passwd",
+		"/docs/../../../etc/shadow",
+		"/docs/%2F..%2F..%2Fetc%2Fpasswd", // percent-encoded (already decoded by net/http, but belt-and-suspenders)
+		"/..",
+		"/docs/..",
+	}
+	for _, p := range traversalPaths {
+		result := m.resolveMarkdownPath(dir, p)
+		if result != "" {
+			t.Errorf("traversal path %q should not resolve, got %q", p, result)
+		}
+	}
+}
+
+// TestSafeJoin verifies that safeJoin blocks any path that escapes absRoot.
+func TestSafeJoin(t *testing.T) {
+	root := t.TempDir() // always absolute on all platforms
+
+	tests := []struct {
+		name      string
+		elem      string
+		wantEmpty bool
+	}{
+		{"normal file", "docs/page.md", false},
+		{"nested subpath", filepath.Join("a", "b", "c.md"), false},
+		{"root itself", ".", false},
+		{"one level up", "..", true},
+		{"one level up with file", filepath.Join("..", "escape.md"), true},
+		{"two levels up", filepath.Join("..", "..", "etc", "passwd"), true},
+		{"up then back in via subdir", filepath.Join("docs", "..", "..", "escape.md"), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := safeJoin(root, tt.elem)
+			if tt.wantEmpty && got != "" {
+				t.Errorf("safeJoin(%q, %q) = %q; expected empty (traversal should be blocked)", root, tt.elem, got)
+			}
+			if !tt.wantEmpty && got == "" {
+				t.Errorf("safeJoin(%q, %q) = empty; expected a path within root", root, tt.elem)
+			}
+			// Any non-empty result must actually be within root.
+			if got != "" && got != root && !strings.HasPrefix(got, root+string(filepath.Separator)) {
+				t.Errorf("safeJoin(%q, %q) = %q escapes root", root, tt.elem, got)
+			}
+		})
+	}
+}
+
+// TestResolveMarkdownPathEdgeCases covers the branches not exercised by
+// TestResolveMarkdownPath: unknown extension (case 4) and no-extension path
+// that falls through to a directory index file (case 3b).
+func TestResolveMarkdownPathEdgeCases(t *testing.T) {
+	dir := setupTestDir(t)
+
+	m := &MarkdownIntercept{
+		IndexNames: []string{"index.html", "index.htm"},
+		Extensions: []string{".html", ".htm"},
+	}
+
+	tests := []struct {
+		name    string
+		reqPath string
+		wantMd  bool
+		wantEnd string
+	}{
+		{
+			// Unknown extensions are ignored — no .md lookup is attempted.
+			name:    "unknown extension is ignored",
+			reqPath: "/readme.rst",
+			wantMd:  false,
+		},
+		{
+			// Case 3b: /docs has no extension, docs.md does not exist, but
+			// docs/index.md does — resolveMarkdownPath should find it.
+			name:    "no extension resolves to directory index",
+			reqPath: "/docs",
+			wantMd:  true,
+			wantEnd: "index.md",
+		},
+		{
+			// Unknown extension with traversal segments: ignored outright.
+			name:    "traversal via unknown extension path — ignored",
+			reqPath: "/../../../etc/passwd.rst",
+			wantMd:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := m.resolveMarkdownPath(dir, tt.reqPath)
+			if tt.wantMd && result == "" {
+				t.Errorf("expected markdown file, got empty")
+			}
+			if !tt.wantMd && result != "" {
+				t.Errorf("expected no markdown file, got %q", result)
+			}
+			if tt.wantMd && result != "" && filepath.Base(result) != tt.wantEnd {
+				t.Errorf("expected filename %q, got %q", tt.wantEnd, filepath.Base(result))
+			}
+		})
+	}
+}
+
+// newRequestWithCaddyContext builds a request with the Caddy replacer injected
+// into its context, which is required by ServeHTTP.
+func newRequestWithCaddyContext(method, target string) *http.Request {
+	r := httptest.NewRequest(method, target, nil)
+	repl := caddy.NewReplacer()
+	ctx := context.WithValue(r.Context(), caddy.ReplacerCtxKey, repl)
+	return r.WithContext(ctx)
+}
+
+// TestServeHTTP exercises the full middleware handler for the three outcomes:
+// markdown file served, pass-through with X-Content-Md header, and plain
+// pass-through when the client does not request markdown.
+func TestServeHTTP(t *testing.T) {
+	dir := setupTestDir(t)
+
+	m := MarkdownIntercept{
+		Root:       dir,
+		IndexNames: []string{"index.html", "index.htm"},
+		Extensions: []string{".html", ".htm"},
+		logger:     zap.NewNop(),
+	}
+
+	tests := []struct {
+		name            string
+		path            string
+		acceptHeader    string
+		wantStatus      int
+		wantContentType string
+		wantNextCalled  bool
+		wantXContentMd  string // expected X-Content-Md on the request seen by next
+	}{
+		{
+			name:            "markdown file found — serve it",
+			path:            "/docs/page.html",
+			acceptHeader:    "text/markdown",
+			wantStatus:      http.StatusOK,
+			wantContentType: "text/markdown; charset=utf-8",
+			wantNextCalled:  false,
+		},
+		{
+			name:           "markdown requested but no .md file — signal next",
+			path:           "/docs/missing.html",
+			acceptHeader:   "text/markdown",
+			wantNextCalled: true,
+			wantXContentMd: "requested",
+		},
+		{
+			name:           "no Accept header — pass through silently",
+			path:           "/docs/page.html",
+			acceptHeader:   "",
+			wantNextCalled: true,
+			wantXContentMd: "", // must NOT be set
+		},
+		{
+			name:           "html preferred over markdown — pass through silently",
+			path:           "/docs/page.html",
+			acceptHeader:   "text/html;q=1.0, text/markdown;q=0.5",
+			wantNextCalled: true,
+			wantXContentMd: "",
+		},
+		{
+			name:            "directory index served as markdown",
+			path:            "/docs/",
+			acceptHeader:    "text/markdown",
+			wantStatus:      http.StatusOK,
+			wantContentType: "text/markdown; charset=utf-8",
+			wantNextCalled:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRequestWithCaddyContext("GET", tt.path)
+			if tt.acceptHeader != "" {
+				r.Header.Set("Accept", tt.acceptHeader)
+			}
+
+			w := httptest.NewRecorder()
+			next := &mockHandler{}
+
+			if err := m.ServeHTTP(w, r, next); err != nil {
+				t.Fatalf("ServeHTTP returned error: %v", err)
+			}
+
+			if next.called != tt.wantNextCalled {
+				t.Errorf("next.called = %v, want %v", next.called, tt.wantNextCalled)
+			}
+			if tt.wantContentType != "" {
+				if got := w.Header().Get("Content-Type"); got != tt.wantContentType {
+					t.Errorf("Content-Type = %q, want %q", got, tt.wantContentType)
+				}
+			}
+			if tt.wantStatus != 0 {
+				if w.Code != tt.wantStatus {
+					t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+				}
+			}
+			// X-Content-Md is set on the request (for downstream handlers).
+			if got := r.Header.Get("X-Content-Md"); got != tt.wantXContentMd {
+				t.Errorf("X-Content-Md = %q, want %q", got, tt.wantXContentMd)
+			}
+		})
 	}
 }

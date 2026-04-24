@@ -9,6 +9,7 @@
 package markdownintercept
 
 import (
+	"bytes"
 	"fmt"
 	"mime"
 	"net/http"
@@ -45,6 +46,12 @@ type MarkdownIntercept struct {
 	// Extensions is the list of file extensions to consider when rewriting
 	// to .md. Defaults to [".html", ".htm", ".php", ".txt"].
 	Extensions []string `json:"extensions,omitempty"`
+
+	// ExperimentalRangeRequests enables support for the non-standard
+	// Range: x-frontmatter request unit, which returns only the YAML/TOML
+	// frontmatter block of a markdown file (206 Partial Content).
+	// Disabled by default.
+	ExperimentalRangeRequests bool `json:"experimental_range_requests,omitempty"`
 
 	logger *zap.Logger
 }
@@ -124,9 +131,34 @@ func (m MarkdownIntercept) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 		return next.ServeHTTP(w, r)
 	}
 
+	if m.ExperimentalRangeRequests {
+		// Advertise x-frontmatter range support on every markdown response.
+		w.Header().Set("Accept-Ranges", "x-frontmatter")
+
+		if r.Header.Get("Range") == "x-frontmatter" {
+			fm, ok := extractFrontmatter(content)
+			if !ok {
+				m.logger.Debug("x-frontmatter range requested but no frontmatter found",
+					zap.String("request_path", r.URL.Path),
+				)
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return nil
+			}
+			m.logger.Debug("serving frontmatter range",
+				zap.String("request_path", r.URL.Path),
+				zap.Int("frontmatter_bytes", len(fm)),
+			)
+			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+			w.Header().Set("Content-Length", strconv.Itoa(len(fm)))
+			w.Header().Set("Content-Range", fmt.Sprintf("x-frontmatter 0-%d/%d", len(fm)-1, len(content)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, err = w.Write(fm)
+			return err
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-	// w.Header().Set("X-Markdown-Source", filepath.Base(mdPath))
+	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 	w.WriteHeader(http.StatusOK)
 	_, err = w.Write(content)
 	return err
@@ -272,6 +304,56 @@ func replaceExtWithMd(filename string) string {
 	return strings.TrimSuffix(filename, ext) + ".md"
 }
 
+// extractFrontmatter returns the frontmatter block from markdown content and
+// true when the document opens with a --- delimited block.  The returned slice
+// covers both delimiters and their trailing newlines, and always starts with
+// "---".  Returns nil, false when content is empty, has no opening delimiter,
+// or has an opening delimiter with no matching closing delimiter.
+func extractFrontmatter(content []byte) ([]byte, bool) {
+	if len(content) == 0 {
+		return nil, false
+	}
+
+	// Opening delimiter must be on the very first line.
+	var openEnd int
+	switch {
+	case bytes.HasPrefix(content, []byte("---\r\n")):
+		openEnd = 5
+	case bytes.HasPrefix(content, []byte("---\n")):
+		openEnd = 4
+	default:
+		return nil, false
+	}
+
+	// Start the search one byte before openEnd so the newline that terminates
+	// the opening delimiter is included.  This lets the "\n---" pattern match
+	// even when the closing delimiter immediately follows the opening one
+	// (i.e. empty frontmatter body: "---\n---\n").
+	searchFrom := openEnd - 1
+	search := content[searchFrom:]
+	offset := searchFrom
+	for len(search) > 0 {
+		idx := bytes.Index(search, []byte("\n---"))
+		if idx < 0 {
+			return nil, false
+		}
+		after := search[idx+4:] // bytes immediately following "\n---"
+		end := offset + idx + 4
+		switch {
+		case len(after) == 0:
+			return content[:end], true
+		case after[0] == '\n':
+			return content[:end+1], true
+		case len(after) >= 2 && after[0] == '\r' && after[1] == '\n':
+			return content[:end+2], true
+		}
+		// Closing candidate was "---something"; not a delimiter — keep scanning.
+		search = search[idx+1:]
+		offset += idx + 1
+	}
+	return nil, false
+}
+
 // fileExists checks whether a file exists and is not a directory.
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
@@ -289,6 +371,7 @@ func fileExists(path string) bool {
 //	    root <path>
 //	    index_names <name1> <name2> ...
 //	    extensions <.ext1> <.ext2> ...
+//	    experimental_range_requests
 //	}
 func (m *MarkdownIntercept) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
@@ -313,6 +396,9 @@ func (m *MarkdownIntercept) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				m.Extensions = args
+
+			case "experimental_range_requests":
+				m.ExperimentalRangeRequests = true
 
 			default:
 				return d.Errf("unrecognized subdirective '%s'", d.Val())

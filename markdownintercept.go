@@ -53,6 +53,14 @@ type MarkdownIntercept struct {
 	// Disabled by default.
 	ExperimentalRangeRequests bool `json:"experimental_range_requests,omitempty"`
 
+	// StrictMode, when enabled, enforces strict content-type negotiation:
+	//   - Requests whose Accept header contains no type compatible with
+	//     text/* or */* are rejected with 406 Not Acceptable.
+	//   - Requests that explicitly ask for text/markdown but have no
+	//     corresponding .md file are also rejected with 406.
+	// Disabled by default.
+	StrictMode bool `json:"strict_mode,omitempty"`
+
 	logger *zap.Logger
 }
 
@@ -90,6 +98,19 @@ func (m *MarkdownIntercept) Validate() error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (m MarkdownIntercept) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// In strict mode, reject any Accept header whose types are all incompatible
+	// with text/* or */* — those can never be served by this middleware or a
+	// standard file server (e.g. image/png, application/x-content-negotiation-probe).
+	if m.StrictMode {
+		if accept := r.Header.Get("Accept"); accept != "" && !hasAcceptableTypes(accept) {
+			m.logger.Debug("strict mode: unsupported Accept type",
+				zap.String("accept", accept),
+			)
+			w.WriteHeader(http.StatusNotAcceptable)
+			return nil
+		}
+	}
+
 	// Check if the client accepts text/markdown
 	if !acceptsMarkdown(r) {
 		return next.ServeHTTP(w, r)
@@ -107,11 +128,16 @@ func (m MarkdownIntercept) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 	// Determine the markdown file path to look for
 	mdPath := m.resolveMarkdownPath(root, reqPath)
 	if mdPath == "" {
-		// No markdown file found; signal to downstream handlers that the client
-		// requested markdown, then pass through.
 		m.logger.Debug("no markdown file found",
 			zap.String("request_path", r.URL.Path),
 		)
+		if m.StrictMode {
+			// Client explicitly requested markdown but none exists.
+			w.WriteHeader(http.StatusNotAcceptable)
+			return nil
+		}
+		// Signal to downstream handlers that the client requested markdown,
+		// then pass through.
 		r.Header.Set("X-Content-Md", "requested")
 		return next.ServeHTTP(w, r)
 	}
@@ -235,6 +261,32 @@ func safeJoin(absRoot, elem string) string {
 func (m *MarkdownIntercept) isKnownExtension(ext string) bool {
 	for _, e := range m.Extensions {
 		if strings.EqualFold(ext, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAcceptableTypes reports whether the Accept header value contains at least
+// one media type compatible with text/* or */* (and not explicitly rejected via
+// q=0).  Returns false only when every listed type is outside the text/*
+// family and no wildcard is present.
+func hasAcceptableTypes(accept string) bool {
+	for _, raw := range strings.Split(accept, ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		q := 1.0
+		if qStr, ok := params["q"]; ok {
+			if v, err := strconv.ParseFloat(qStr, 64); err == nil {
+				q = v
+			}
+		}
+		if q <= 0 {
+			continue
+		}
+		if mediaType == "*/*" || strings.HasPrefix(mediaType, "text/") {
 			return true
 		}
 	}
@@ -372,6 +424,7 @@ func fileExists(path string) bool {
 //	    index_names <name1> <name2> ...
 //	    extensions <.ext1> <.ext2> ...
 //	    experimental_range_requests
+//	    strict_mode
 //	}
 func (m *MarkdownIntercept) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
@@ -399,6 +452,9 @@ func (m *MarkdownIntercept) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 			case "experimental_range_requests":
 				m.ExperimentalRangeRequests = true
+
+			case "strict_mode":
+				m.StrictMode = true
 
 			default:
 				return d.Errf("unrecognized subdirective '%s'", d.Val())

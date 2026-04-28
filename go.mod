@@ -4,6 +4,7 @@ go 1.22.3
 
 require (
 	github.com/caddyserver/caddy/v2 v2.9.1
+	github.com/russross/blackfriday/v2 v2.1.0
 	go.uber.org/zap v1.27.0
 )
 
@@ -73,7 +74,6 @@ require (
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/quic-go/quic-go v0.48.2 // indirect
 	github.com/rs/xid v1.5.0 // indirect
-	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/shurcooL/sanitized_anchor_name v1.0.0 // indirect
 	github.com/slackhq/nebula v1.6.1 // indirect

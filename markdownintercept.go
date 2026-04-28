@@ -23,6 +23,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/microcosm-cc/bluemonday"
 	blackfriday "github.com/russross/blackfriday/v2"
 	"go.uber.org/zap"
 )
@@ -405,7 +406,8 @@ func (m *MarkdownIntercept) convertMdFileToHTML(root, reqPath string) ([]byte, b
 		)
 		return nil, false
 	}
-	return blackfriday.Run(content), true
+	unsafe := blackfriday.Run(content)
+	return bluemonday.UGCPolicy().SanitizeBytes(unsafe), true
 }
 
 // replaceExtWithMd replaces the file extension with .md.

@@ -431,6 +431,158 @@ func TestServeHTTP(t *testing.T) {
 	}
 }
 
+func TestHasAcceptableTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		accept string
+		want   bool
+	}{
+		{"text/html", "text/html", true},
+		{"text/markdown", "text/markdown", true},
+		{"text wildcard", "text/*", true},
+		{"global wildcard", "*/*", true},
+		{"image rejected", "image/png", false},
+		{"application probe rejected", "application/x-content-negotiation-probe", false},
+		{"application/json rejected", "application/json", false},
+		{"mixed: text + app", "text/html, application/json", true},
+		{"mixed: app only", "application/json, application/xml", false},
+		{"text explicitly q=0 only", "text/html;q=0", false},
+		{"wildcard q=0 only", "*/*;q=0", false},
+		{"image + wildcard q=0", "image/png, */*;q=0", false},
+		{"image + text q=0.5", "image/png, text/html;q=0.5", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasAcceptableTypes(tt.accept)
+			if got != tt.want {
+				t.Errorf("hasAcceptableTypes(%q) = %v, want %v", tt.accept, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStrictMode(t *testing.T) {
+	dir := setupTestDir(t)
+
+	strict := MarkdownIntercept{
+		Root:       dir,
+		IndexNames: []string{"index.html"},
+		Extensions: []string{".html"},
+		StrictMode: true,
+		logger:     zap.NewNop(),
+	}
+	lenient := MarkdownIntercept{
+		Root:       dir,
+		IndexNames: []string{"index.html"},
+		Extensions: []string{".html"},
+		logger:     zap.NewNop(),
+	}
+
+	tests := []struct {
+		name           string
+		m              MarkdownIntercept
+		path           string
+		accept         string
+		wantStatus     int
+		wantNextCalled bool
+	}{
+		// --- strict mode: unsupported types rejected immediately ---
+		{
+			name:       "strict: probe type → 406",
+			m:          strict,
+			path:       "/docs/page.html",
+			accept:     "application/x-content-negotiation-probe",
+			wantStatus: http.StatusNotAcceptable,
+		},
+		{
+			name:       "strict: image/png → 406",
+			m:          strict,
+			path:       "/docs/page.html",
+			accept:     "image/png",
+			wantStatus: http.StatusNotAcceptable,
+		},
+		{
+			name:       "strict: application/json → 406",
+			m:          strict,
+			path:       "/docs/page.html",
+			accept:     "application/json",
+			wantStatus: http.StatusNotAcceptable,
+		},
+		// --- strict mode: markdown requested but file missing → 406 ---
+		{
+			name:       "strict: text/markdown, no file → 406",
+			m:          strict,
+			path:       "/docs/missing.html",
+			accept:     "text/markdown",
+			wantStatus: http.StatusNotAcceptable,
+		},
+		// --- strict mode: acceptable types pass through or serve normally ---
+		{
+			name:           "strict: text/html → pass through",
+			m:              strict,
+			path:           "/docs/page.html",
+			accept:         "text/html",
+			wantNextCalled: true,
+		},
+		{
+			name:           "strict: */* → pass through",
+			m:              strict,
+			path:           "/docs/page.html",
+			accept:         "*/*",
+			wantNextCalled: true,
+		},
+		{
+			name:       "strict: text/markdown, file exists → 200",
+			m:          strict,
+			path:       "/docs/page.html",
+			accept:     "text/markdown",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:           "strict: mixed text/html + application/json → pass through (text wins)",
+			m:              strict,
+			path:           "/docs/page.html",
+			accept:         "text/html, application/json",
+			wantNextCalled: true,
+		},
+		// --- lenient mode: unsupported types silently pass through ---
+		{
+			name:           "lenient: probe type → pass through",
+			m:              lenient,
+			path:           "/docs/page.html",
+			accept:         "application/x-content-negotiation-probe",
+			wantNextCalled: true,
+		},
+		{
+			name:           "lenient: text/markdown, no file → pass through with header",
+			m:              lenient,
+			path:           "/docs/missing.html",
+			accept:         "text/markdown",
+			wantNextCalled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRequestWithCaddyContext("GET", tt.path)
+			r.Header.Set("Accept", tt.accept)
+			w := httptest.NewRecorder()
+			next := &mockHandler{}
+
+			if err := tt.m.ServeHTTP(w, r, next); err != nil {
+				t.Fatalf("ServeHTTP error: %v", err)
+			}
+			if tt.wantStatus != 0 && w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			if next.called != tt.wantNextCalled {
+				t.Errorf("next.called = %v, want %v", next.called, tt.wantNextCalled)
+			}
+		})
+	}
+}
+
 func TestExtractFrontmatter(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -23,6 +23,8 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/microcosm-cc/bluemonday"
+	blackfriday "github.com/russross/blackfriday/v2"
 	"go.uber.org/zap"
 )
 
@@ -111,19 +113,29 @@ func (m MarkdownIntercept) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 		}
 	}
 
-	// Check if the client accepts text/markdown
-	if !acceptsMarkdown(r) {
-		return next.ServeHTTP(w, r)
-	}
-
-	// Resolve the root directory, expanding any Caddy placeholders
+	// Resolve root and sanitize path once; both branches below need them.
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 	root := repl.ReplaceAll(m.Root, ".")
+	reqPath := path.Clean("/" + r.URL.Path)
 
-	reqPath := r.URL.Path
-
-	// Sanitize the path to prevent directory traversal
-	reqPath = path.Clean("/" + reqPath)
+	// Check if the client accepts text/markdown
+	if !acceptsMarkdown(r) {
+		// When not in strict mode, convert a .md file to HTML for clients that
+		// accept text/html (e.g. browsers navigating directly to a .md URL).
+		if !m.StrictMode && strings.HasSuffix(reqPath, ".md") && acceptsHTML(r) {
+			if html, ok := m.convertMdFileToHTML(root, reqPath); ok {
+				m.logger.Debug("serving markdown as HTML",
+					zap.String("request_path", r.URL.Path),
+				)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Content-Length", strconv.Itoa(len(html)))
+				w.WriteHeader(http.StatusOK)
+				_, err := w.Write(html)
+				return err
+			}
+		}
+		return next.ServeHTTP(w, r)
+	}
 
 	// Determine the markdown file path to look for
 	mdPath := m.resolveMarkdownPath(root, reqPath)
@@ -344,6 +356,58 @@ func acceptsMarkdown(r *http.Request) bool {
 	// Serve markdown only when it is explicitly present, not rejected (q>0),
 	// and tied for the highest preference among all listed types.
 	return markdownQ > 0 && markdownQ >= maxQ
+}
+
+// acceptsHTML reports whether the request's Accept header includes text/html,
+// text/*, or */* with a q-value greater than zero.
+func acceptsHTML(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	if accept == "" {
+		return false
+	}
+	for _, raw := range strings.Split(accept, ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		q := 1.0
+		if qStr, ok := params["q"]; ok {
+			if v, err := strconv.ParseFloat(qStr, 64); err == nil {
+				q = v
+			}
+		}
+		if q <= 0 {
+			continue
+		}
+		if mediaType == "text/html" || mediaType == "*/*" || mediaType == "text/*" {
+			return true
+		}
+	}
+	return false
+}
+
+// convertMdFileToHTML resolves the .md file at reqPath under root, reads it,
+// and returns the rendered HTML. Returns nil, false when the file cannot be
+// found or read.
+func (m *MarkdownIntercept) convertMdFileToHTML(root, reqPath string) ([]byte, bool) {
+	absRoot, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return nil, false
+	}
+	candidate := safeJoin(absRoot, filepath.FromSlash(reqPath))
+	if candidate == "" || !fileExists(candidate) {
+		return nil, false
+	}
+	content, err := os.ReadFile(candidate)
+	if err != nil {
+		m.logger.Error("failed to read markdown file for HTML conversion",
+			zap.String("path", candidate),
+			zap.Error(err),
+		)
+		return nil, false
+	}
+	unsafe := blackfriday.Run(content)
+	return bluemonday.UGCPolicy().SanitizeBytes(unsafe), true
 }
 
 // replaceExtWithMd replaces the file extension with .md.

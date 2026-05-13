@@ -394,6 +394,27 @@ func TestServeHTTP(t *testing.T) {
 			wantContentType: "text/markdown; charset=utf-8",
 			wantNextCalled:  false,
 		},
+		{
+			name:            "html requested for .md file — serve converted HTML",
+			path:            "/docs/page.md",
+			acceptHeader:    "text/html",
+			wantStatus:      http.StatusOK,
+			wantContentType: "text/html; charset=utf-8",
+			wantNextCalled:  false,
+		},
+		{
+			name:           "html requested for nonexistent .md file — pass through",
+			path:           "/docs/missing.md",
+			acceptHeader:   "text/html",
+			wantNextCalled: true,
+		},
+		{
+			name:           "html requested for non-.md path — pass through",
+			path:           "/docs/page.html",
+			acceptHeader:   "text/html",
+			wantNextCalled: true,
+			wantXContentMd: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -457,6 +478,38 @@ func TestHasAcceptableTypes(t *testing.T) {
 			got := hasAcceptableTypes(tt.accept)
 			if got != tt.want {
 				t.Errorf("hasAcceptableTypes(%q) = %v, want %v", tt.accept, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAcceptsHTML(t *testing.T) {
+	tests := []struct {
+		name   string
+		accept string
+		want   bool
+	}{
+		{"explicit text/html", "text/html", true},
+		{"global wildcard", "*/*", true},
+		{"text wildcard", "text/*", true},
+		{"text/html with q", "text/html;q=0.9", true},
+		{"text/html q=0 rejected", "text/html;q=0", false},
+		{"markdown only", "text/markdown", false},
+		{"application/json", "application/json", false},
+		{"empty", "", false},
+		{"mixed text/html and markdown", "text/html, text/markdown", true},
+		{"text/html lower q than json", "text/html;q=0.5, application/json;q=1.0", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/", nil)
+			if tt.accept != "" {
+				r.Header.Set("Accept", tt.accept)
+			}
+			got := acceptsHTML(r)
+			if got != tt.want {
+				t.Errorf("acceptsHTML() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -559,6 +612,14 @@ func TestStrictMode(t *testing.T) {
 			m:              lenient,
 			path:           "/docs/missing.html",
 			accept:         "text/markdown",
+			wantNextCalled: true,
+		},
+		// --- strict mode: HTML conversion disabled even for .md files ---
+		{
+			name:           "strict: html requested for .md file — no conversion, pass through",
+			m:              strict,
+			path:           "/docs/page.md",
+			accept:         "text/html",
 			wantNextCalled: true,
 		},
 	}

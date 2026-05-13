@@ -9,31 +9,31 @@
 
 # Global options block must come first
 {
-    # Register markdown_intercept before file_server so it runs first
-    order markdown_intercept before file_server
+	# Register markdown_intercept before file_server so it runs first
+	order markdown_intercept before file_server
 
-    # Admin API — bind to localhost only; remove this block to use the default
-    admin localhost:2019
+	# Admin API — bind to localhost only; remove this block to use the default
+	admin localhost:2019
 }
 
 :80 {
-    root * /srv
+	root * /srv
 
-    # Enable markdown content negotiation.
-    # When a client sends Accept: text/markdown, the middleware looks for a
-    # .md file alongside the requested resource and serves it if found.
-    markdown_intercept {
-        root /srv
-        index_names index.html index.htm index.php
-        extensions .html .htm .php .txt
-    }
+	# Enable markdown content negotiation.
+	# When a client sends Accept: text/markdown, the middleware looks for a
+	# .md file alongside the requested resource and serves it if found.
+	markdown_intercept {
+		root /srv
+		index_names index.html index.htm index.php
+		extensions .html .htm .php .txt
+	}
 
-    # Serve static files for non-markdown requests
-    file_server
+	# Serve static files for non-markdown requests
+	file_server
 
-    # Optional: structured access logging
-    log {
-        output stdout
-        format console
-    }
+	# Optional: structured access logging
+	log {
+		output stdout
+		format console
+	}
 }
